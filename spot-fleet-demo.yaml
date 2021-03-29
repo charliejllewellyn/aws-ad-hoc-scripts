@@ -1,0 +1,1062 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Description: A CloudFormation template that will deploy a test environment as a part of the Amazon EC2 Spot CI/CD Workshop. This template is provided as-is under a modified MIT license - please see https://github.com/aws-samples/amazon-ec2-spot-cicd-workshop/blob/master/LICENSE
+
+Parameters:
+  MaxPerHourCostInDollars:
+    Type: String
+    Default: 2
+  LaunchTemplateVersion:
+    Type: String
+    Default: 1
+  NumberOfCPUs:
+    Type: String
+    Default: 456
+  ProjectName:
+    Type: String
+    Default: jps-spot-demo
+
+Resources:
+
+  VPC:
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: https://aws-quickstart.s3.amazonaws.com/quickstart-aws-vpc/templates/aws-vpc.template.yaml
+      Parameters:
+        AvailabilityZones: eu-west-2a,eu-west-2b,eu-west-2c
+        CreateNATGateways: false
+        CreatePrivateSubnets: false
+        NumberOfAZs: 3
+      Tags:
+        - Key: Name
+          Value: Spot-Demo
+        - Key: ProjectName
+          Value: !Ref ProjectName
+
+  IAMSpotRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service:
+            - ec2.amazonaws.com
+            - spotfleet.amazonaws.com
+          Action:
+          - sts:AssumeRole
+      Path: /
+      Policies:
+      - PolicyName: Test
+        PolicyDocument:
+          Version: 2012-10-17
+          Statement:
+            - Effect: Allow
+              Action:
+              - ec2:DescribeImages
+              - ec2:DescribeSubnets
+              - ec2:RequestSpotInstances
+              - ec2:DescribeInstanceStatus
+              - ec2:RunInstances
+              Resource:
+              - "*"
+            - Effect: Allow
+              Action:
+              - iam:PassRole
+              Resource:
+              - "*"
+              Condition:
+                StringEquals:
+                  iam:PassedToService:
+                  - ec2.amazonaws.com
+                  - ec2.amazonaws.com.cn
+            - Effect: Allow
+              Action:
+              - ec2:CreateTags
+              Resource:
+              - arn:aws:ec2:*:*:instance/*
+              - arn:aws:ec2:*:*:spot-instances-request/*
+              - arn:aws:ec2:*:*:spot-fleet-request/*
+              - arn:aws:ec2:*:*:volume/*
+            - Effect: Allow
+              Action:
+              - ec2:TerminateInstances
+              Resource: "*"
+              Condition:
+                StringLike:
+                  ec2:ResourceTag/aws:ec2spot:fleet-request-id: "*"
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:RegisterInstancesWithLoadBalancer
+              Resource:
+              - arn:aws:elasticloadbalancing:*:*:loadbalancer/*
+            - Effect: Allow
+              Action:
+              - elasticloadbalancing:RegisterTargets
+              Resource:
+              - arn:aws:elasticloadbalancing:*:*:*/*
+
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: SPTvacmRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Path: "/"
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/service-role/AmazonSSMAutomationRole
+
+  InstanceProfile: 
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: 
+        - !Ref IAMRole
+
+  MyLaunchTemplate1:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateData:
+        ImageId: ami-0b6b51e397faf2316
+        InstanceType: t2.micro
+        Monitoring: 
+          Enabled: true
+        IamInstanceProfile: 
+          Name: !Ref InstanceProfile
+        TagSpecifications:
+          - ResourceType: instance
+            Tags:
+              - Key: Name
+                Value: Spot-Demo
+              - Key: ProjectName
+                Value: !Ref ProjectName
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            amazon-linux-extras install epel -y
+            yum install stress -y
+            stress --cpu $(lscpu | grep 'CPU(s):' | head -1 | awk '{print $2}') --timeout 604800s &
+
+  SpotFleet:
+    Type: AWS::EC2::SpotFleet
+    Properties:
+      SpotFleetRequestConfigData:
+        AllocationStrategy: lowestPrice
+        InstanceInterruptionBehavior: terminate
+        InstancePoolsToUseCount: 50
+        IamFleetRole: !GetAtt IAMSpotRole.Arn
+        TargetCapacity: !Ref NumberOfCPUs
+        Type: maintain
+        SpotMaxTotalPrice: !Ref MaxPerHourCostInDollars
+        LaunchTemplateConfigs:
+          - LaunchTemplateSpecification: 
+              LaunchTemplateId: !Ref MyLaunchTemplate1
+              Version: !Ref LaunchTemplateVersion
+            Overrides:
+              - InstanceType: r5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.metal
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.metal
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.metal
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c4.8xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c4.8xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c4.8xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5a.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5a.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5a.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.18xlarge
+                WeightedCapacity: 72
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5n.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5n.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5n.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.8xlarge
+                WeightedCapacity: 32
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.9xlarge
+                WeightedCapacity: 36
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.4xlarge
+                WeightedCapacity: 16
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: c5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: c5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: c5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: r5.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: r5.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: r5.12xlarge
+                WeightedCapacity: 48
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m4.10xlarge
+                WeightedCapacity: 40
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m4.10xlarge
+                WeightedCapacity: 40
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m4.10xlarge
+                WeightedCapacity: 40
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5ad.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5d.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: z1d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: z1d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: z1d.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t3a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t3a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t3a.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t3.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t3.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t3.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t3.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t3.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t3.large
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t3a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t3a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t3a.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: i3en.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: i3en.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: i3en.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: x1.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: x1.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: x1.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: d2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: d2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: d2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: i3en.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: i3en.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: i3en.metal
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: g3.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: g3.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: g3.16xlarge
+                WeightedCapacity: 64
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t2.xlarge
+                WeightedCapacity: 4
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t4g.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t4g.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t4g.medium
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t2.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t2.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t2.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: t4g.nano
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: t4g.nano
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: t4g.nano
+                WeightedCapacity: 2
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: g4dn.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: g4dn.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: g4dn.2xlarge
+                WeightedCapacity: 8
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
+              - InstanceType: m5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet1ID
+              - InstanceType: m5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet2ID
+              - InstanceType: m5.24xlarge
+                WeightedCapacity: 96
+                SubnetId: !GetAtt VPC.Outputs.PublicSubnet3ID
